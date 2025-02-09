@@ -1,6 +1,47 @@
-use starknet::ContractAddress;
-use starknet::storage::Map;
+use starknet::{ContractAddress, get_caller_address, get_block_timestamp};
 use array::ArrayTrait;
+use option::OptionTrait;
+use traits::Into;
+use zeroable::Zeroable;
+use starknet::storage::Map;
+
+// Storage types and mappings
+#[derive(Drop, Serde, Copy)]
+struct MarketDetails {
+    name: felt252,
+    market_type: u8,
+    prediction_parameters: Array<felt252>,
+    deadline: u64,
+    min_stake: u256,
+    max_stake: u256,
+    is_closed: bool
+}
+
+#[derive(Drop, Serde, Copy)]
+struct BetDetails {
+    stake: u256,
+    odds: u256,
+    predicted_outcome: u32
+}
+
+#[derive(Drop, Serde, Copy)]
+struct AIAgentDetails {
+    is_verified: bool,
+    reputation: u256,
+    credentials: felt252
+}
+
+#[derive(Drop, Serde, Copy)]
+struct AIAnalysis {
+    confidence_score: u256,
+    analysis_data: Array<felt252>
+}
+
+#[derive(Drop, Serde, Copy)]
+struct RobotForecast {
+    efficiency_score: u256,
+    forecast_data: Array<felt252>
+}
 
 #[starknet::interface]
 trait IAIPredictionMarket<TContractState> {
@@ -43,32 +84,26 @@ trait IAIPredictionMarket<TContractState> {
         forecast_data: Array<felt252>
     );
     
-    // Oracle functions
-    fn update_external_data(
-        ref self: TContractState,
-        market_id: u32,
-        data_type: felt252,
-        data: Array<felt252>
-    );
-    
     // Query functions
-    fn get_market_details(self: @TContractState, market_id: u32) -> (felt252, u8, Array<felt252>, u64, u256, u256, bool);
-    fn get_ai_analysis(self: @TContractState, market_id: u32) -> (u256, Array<felt252>);
+    fn get_market_details(self: @TContractState, market_id: u32) -> MarketDetails;
+    fn get_ai_analysis(self: @TContractState, market_id: u32) -> AIAnalysis;
     fn get_supply_metrics(self: @TContractState, market_id: u32) -> Array<u256>;
-    fn get_robot_efficiency_forecast(self: @TContractState, market_id: u32, robot_id: felt252) -> (u256, Array<felt252>);
-    fn get_ai_agent_details(self: @TContractState, agent_address: ContractAddress) -> (bool, u256, felt252);
+    fn get_robot_efficiency_forecast(self: @TContractState, market_id: u32, robot_id: felt252) -> RobotForecast;
+    fn get_ai_agent_details(self: @TContractState, agent_address: ContractAddress) -> AIAgentDetails;
     fn get_total_liquidity(self: @TContractState) -> u256;
-    fn get_market_stats(self: @TContractState, market_id: u32) -> (u256, u256, u32);
+    fn get_market_stats(self: @TContractState, market_id: u32) -> BetDetails;
 }
 
 #[starknet::contract]
 mod AIPredictionMarket {
     use super::IAIPredictionMarket;
+    use super::{MarketDetails, BetDetails, AIAgentDetails, AIAnalysis, RobotForecast};
     use starknet::{ContractAddress, get_caller_address, get_block_timestamp};
     use array::ArrayTrait;
     use option::OptionTrait;
     use traits::Into;
     use zeroable::Zeroable;
+    use starknet::storage::Map;
 
     const ADMIN_ROLE: felt252 = 1;
     const ORACLE_ROLE: felt252 = 2;
@@ -78,31 +113,20 @@ mod AIPredictionMarket {
 
     #[storage]
     struct Storage {
-        // Core storage
         total_liquidity_pool: u256,
         next_market_id: u32,
-        
-        // Role and access control
-        roles: LegacyMap::<(ContractAddress, felt252), bool>,
-        
-        // Market related storage
-        market_details: LegacyMap::<u32, (felt252, u8, Array<felt252>, u64, u256, u256, bool)>,
-        market_bets: LegacyMap::<(u32, ContractAddress), (u256, u256, u32)>,
-        market_outcomes: LegacyMap::<u32, u32>,
-        market_total_stakes: LegacyMap::<u32, u256>,
-        rewards_claimed: LegacyMap::<(u32, ContractAddress), bool>,
-        liquidity_provider_stakes: LegacyMap::<ContractAddress, u256>,
-        
-        // AI and analysis storage
-        ai_agents: LegacyMap::<ContractAddress, (bool, u256, felt252)>,
-        ai_analyses: LegacyMap::<u32, (u256, Array<felt252>)>,
-        
-        // Supply chain and robotics storage
-        supply_metrics: LegacyMap::<u32, Array<u256>>,
-        robot_forecasts: LegacyMap::<(u32, felt252), (u256, Array<felt252>)>,
-        
-        // Risk management
-        market_risk_scores: LegacyMap::<u32, u256>,
+        roles: Map<(ContractAddress, felt252), bool>,
+        market_details: Map<u32, MarketDetails>,
+        market_bets: Map<(u32, ContractAddress), BetDetails>,
+        market_outcomes: Map<u32, u32>,
+        market_total_stakes: Map<u32, u256>,
+        rewards_claimed: Map<(u32, ContractAddress), bool>,
+        liquidity_provider_stakes: Map<ContractAddress, u256>,
+        ai_agents: Map<ContractAddress, AIAgentDetails>,
+        ai_analyses: Map<u32, AIAnalysis>,
+        supply_metrics: Map<u32, Array<u256>>,
+        robot_forecasts: Map<(u32, felt252), RobotForecast>,
+        market_risk_scores: Map<u32, u256>,
         circuit_breaker_triggered: bool
     }
 
@@ -119,11 +143,9 @@ mod AIPredictionMarket {
         AIAnalysisSubmitted: AIAnalysisSubmitted,
         SupplyMetricsUpdated: SupplyMetricsUpdated,
         RobotForecastUpdated: RobotForecastUpdated,
-        CircuitBreakerTriggered: CircuitBreakerTriggered,
-        ExternalDataUpdated: ExternalDataUpdated
+        CircuitBreakerTriggered: CircuitBreakerTriggered
     }
 
-    // Event structs
     #[derive(Drop, starknet::Event)]
     struct MarketCreated {
         market_id: u32,
@@ -197,13 +219,6 @@ mod AIPredictionMarket {
         reason: felt252
     }
 
-    #[derive(Drop, starknet::Event)]
-    struct ExternalDataUpdated {
-        market_id: u32,
-        data_type: felt252,
-        timestamp: u64
-    }
-
     #[constructor]
     fn constructor(ref self: ContractState, admin: ContractAddress) {
         self.roles.write((admin, ADMIN_ROLE), true);
@@ -215,8 +230,8 @@ mod AIPredictionMarket {
     #[abi(embed_v0)]
     impl AIPredictionMarketImpl of IAIPredictionMarket<ContractState> {
         fn add_liquidity(ref self: ContractState, amount: u256) {
-            assert(!self.circuit_breaker_triggered.read(), 'Circuit breaker active');
-            assert(amount > 0, 'Invalid amount');
+            assert!(!self.circuit_breaker_triggered.read(), "Circuit breaker active");
+            assert!(amount > 0, "Invalid amount");
             
             let caller = get_caller_address();
             self.total_liquidity_pool.write(self.total_liquidity_pool.read() + amount);
@@ -229,11 +244,10 @@ mod AIPredictionMarket {
         }
 
         fn remove_liquidity(ref self: ContractState, amount: u256) {
-            assert(!self.circuit_breaker_triggered.read(), 'Circuit breaker active');
-            
+            assert!(!self.circuit_breaker_triggered.read(), "Circuit breaker active");
             let caller = get_caller_address();
             let current_stake = self.liquidity_provider_stakes.read(caller);
-            assert(current_stake >= amount, 'Insufficient stake');
+            assert!(current_stake >= amount, "Insufficient stake");
             
             self.total_liquidity_pool.write(self.total_liquidity_pool.read() - amount);
             self.liquidity_provider_stakes.write(caller, current_stake - amount);
@@ -250,69 +264,64 @@ mod AIPredictionMarket {
             min_stake: u256,
             max_stake: u256
         ) {
-            assert(!self.circuit_breaker_triggered.read(), 'Circuit breaker active');
-            assert(market_type >= 1 && market_type <= 3, 'Invalid market type');
-            assert(deadline > get_block_timestamp(), 'Invalid deadline');
-            assert(min_stake > 0 && max_stake > min_stake, 'Invalid stakes');
-            assert(
-                self.validate_market_parameters(market_type, prediction_parameters),
-                'Invalid parameters'
-            );
+            assert!(!self.circuit_breaker_triggered.read(), "Circuit breaker active");
+            assert!(market_type >= 1 && market_type <= 3, "Invalid market type");
+            assert!(deadline > get_block_timestamp(), "Invalid deadline");
+            assert!(min_stake > 0 && max_stake > min_stake, "Invalid stakes");
             
             let market_id = self.next_market_id.read();
-            let creator = get_caller_address();
+            let _market_details = MarketDetails {
+                name,
+                market_type,
+                prediction_parameters,
+                deadline,
+                min_stake,
+                max_stake,
+                is_closed: false
+            };
             
-            self.market_details.write(
-                market_id,
-                (name, market_type, prediction_parameters, deadline, min_stake, max_stake, false)
-            );
+            self.market_details.write(market_id, market_details);
+            self.next_market_id.write(market_id + 1);
             
             self.emit(Event::MarketCreated(MarketCreated {
                 market_id,
-                creator,
+                creator: get_caller_address(),
                 market_type,
                 deadline
             }));
-            
-            self.next_market_id.write(market_id + 1);
         }
 
         fn close_market(ref self: ContractState, market_id: u32) {
             let caller = get_caller_address();
-            assert(self.roles.read((caller, ADMIN_ROLE)), 'Admin only');
+            assert!(self.roles.read((caller, ADMIN_ROLE)), "Admin only");
             
-            let (name, market_type, params, deadline, min_stake, max_stake, _) = 
-                self.market_details.read(market_id);
-            
-            self.market_details.write(
-                market_id,
-                (name, market_type, params, deadline, min_stake, max_stake, true)
-            );
+            let mut market_details = self.market_details.read(market_id);
+            market_details.is_closed = true;
+            self.market_details.write(market_id, market_details);
         }
 
         fn place_bet(ref self: ContractState, market_id: u32, stake: u256, predicted_outcome: u32) {
-            assert(!self.circuit_breaker_triggered.read(), 'Circuit breaker active');
+            assert!(!self.circuit_breaker_triggered.read(), "Circuit breaker active");
             
-            let (_, _, _, deadline, min_stake, max_stake, is_closed) = 
-                self.market_details.read(market_id);
-            
-            assert(!is_closed, 'Market is closed');
-            assert(get_block_timestamp() < deadline, 'Market expired');
-            assert(stake >= min_stake && stake <= max_stake, 'Invalid stake amount');
+            let market_details = self.market_details.read(market_id);
+            assert!(!market_details.is_closed, "Market is closed");
+            assert!(get_block_timestamp() < market_details.deadline, "Market expired");
+            assert!(stake >= market_details.min_stake && stake <= market_details.max_stake, "Invalid stake amount");
             
             let caller = get_caller_address();
             let odds = self.calculate_odds(market_id, stake);
             
-            // Update total stakes for the market
+            let bet_details = BetDetails {
+                stake,
+                odds,
+                predicted_outcome
+            };
+            
+            self.market_bets.write((market_id, caller), bet_details);
             self.market_total_stakes.write(
                 market_id,
                 self.market_total_stakes.read(market_id) + stake
             );
-            
-            self.market_bets.write((market_id, caller), (stake, odds, predicted_outcome));
-            
-            // Check risk thresholds after placing bet
-            assert(self.check_risk_thresholds(market_id), 'Risk threshold exceeded');
             
             self.emit(Event::BetPlaced(BetPlaced {
                 market_id,
@@ -320,15 +329,18 @@ mod AIPredictionMarket {
                 stake,
                 predicted_outcome
             }));
+            
+            // Check risk thresholds
+            self.check_risk_thresholds(market_id);
         }
 
         fn resolve_market(ref self: ContractState, market_id: u32, winning_outcome: u32) {
             let caller = get_caller_address();
-            assert(self.roles.read((caller, ADMIN_ROLE)), 'Admin only');
+            assert!(self.roles.read((caller, ADMIN_ROLE)), "Admin only");
             
-            let (_, _, _, deadline, _, _, is_closed) = self.market_details.read(market_id);
-            assert(!is_closed, 'Market already closed');
-            assert(get_block_timestamp() >= deadline, 'Market not expired');
+            let market_details = self.market_details.read(market_id);
+            assert!(!market_details.is_closed, "Market already closed");
+            assert!(get_block_timestamp() >= market_details.deadline, "Market not expired");
             
             self.market_outcomes.write(market_id, winning_outcome);
             self.close_market(market_id);
@@ -341,14 +353,14 @@ mod AIPredictionMarket {
 
         fn claim_reward(ref self: ContractState, market_id: u32) {
             let caller = get_caller_address();
-            assert(!self.rewards_claimed.read((market_id, caller)), 'Already claimed');
+            assert!(!self.rewards_claimed.read((market_id, caller)), "Already claimed");
             
             let winning_outcome = self.market_outcomes.read(market_id);
-            let (stake, odds, predicted_outcome) = self.market_bets.read((market_id, caller));
+            let bet_details = self.market_bets.read((market_id, caller));
             
-            assert(predicted_outcome == winning_outcome, 'No winning bet');
+            assert!(bet_details.predicted_outcome == winning_outcome, "No winning bet");
             
-            let reward = (stake * odds) / BASE_REWARD_MULTIPLIER;
+            let reward = (bet_details.stake * bet_details.odds) / BASE_REWARD_MULTIPLIER;
             self.rewards_claimed.write((market_id, caller), true);
             
             self.emit(Event::RewardClaimed(RewardClaimed {
@@ -358,15 +370,17 @@ mod AIPredictionMarket {
             }));
         }
 
-        fn register_ai_agent(
-            ref self: ContractState,
-            agent_address: ContractAddress,
-            credentials: felt252
-        ) {
+        fn register_ai_agent(ref self: ContractState, agent_address: ContractAddress, credentials: felt252) {
             let caller = get_caller_address();
-            assert(self.roles.read((caller, ADMIN_ROLE)), 'Admin only');
+            assert!(self.roles.read((caller, ADMIN_ROLE)), "Admin only");
             
-            self.ai_agents.write(agent_address, (true, 100, credentials));
+            let agent_details = AIAgentDetails {
+                is_verified: true,
+                reputation: 100,
+                credentials: credentials
+            };
+            
+            self.ai_agents.write(agent_address, agent_details);
             
             self.emit(Event::AIAgentRegistered(AIAgentRegistered {
                 agent: agent_address,
@@ -380,13 +394,14 @@ mod AIPredictionMarket {
             reputation_score: u256
         ) {
             let caller = get_caller_address();
-            assert(self.roles.read((caller, ADMIN_ROLE)), 'Admin only');
-            assert(reputation_score <= MAX_REPUTATION_SCORE, 'Invalid reputation score');
+            assert!(self.roles.read((caller, ADMIN_ROLE)), "Admin only");
+            assert!(reputation_score <= MAX_REPUTATION_SCORE, "Invalid reputation score");
             
-            let (is_verified, _, credentials) = self.ai_agents.read(agent_address);
-            assert(is_verified, 'Agent not verified');
+            let mut agent_details = self.ai_agents.read(agent_address);
+            assert!(agent_details.is_verified, "Agent not verified");
             
-            self.ai_agents.write(agent_address, (true, reputation_score, credentials));
+            agent_details.reputation = reputation_score;
+            self.ai_agents.write(agent_address, agent_details);
         }
 
         fn submit_ai_analysis(
@@ -396,13 +411,18 @@ mod AIPredictionMarket {
             analysis_data: Array<felt252>
         ) {
             let caller = get_caller_address();
-            let (is_verified, reputation, _) = self.ai_agents.read(caller);
+            let agent_details = self.ai_agents.read(caller);
             
-            assert(is_verified, 'Agent not verified');
-            assert(confidence_score >= MIN_CONFIDENCE_SCORE, 'Low confidence score');
-            assert(reputation >= MIN_CONFIDENCE_SCORE, 'Low reputation score');
+            assert!(agent_details.is_verified, "Agent not verified");
+            assert!(confidence_score >= MIN_CONFIDENCE_SCORE, "Low confidence score");
+            assert!(agent_details.reputation >= MIN_CONFIDENCE_SCORE, "Low reputation score");
             
-            self.ai_analyses.write(market_id, (confidence_score, analysis_data));
+            let analysis = AIAnalysis {
+                confidence_score,
+                analysis_data
+            };
+            
+            self.ai_analyses.write(market_id, analysis);
             
             self.emit(Event::AIAnalysisSubmitted(AIAnalysisSubmitted {
                 market_id,
@@ -411,17 +431,13 @@ mod AIPredictionMarket {
             }));
         }
 
-        fn update_supply_metrics(
-            ref self: ContractState,
-            market_id: u32,
-            metrics: Array<u256>
-        ) {
+        fn update_supply_metrics(ref self: ContractState, market_id: u32, metrics: Array<u256>) {
             let caller = get_caller_address();
-            assert(self.roles.read((caller, ORACLE_ROLE)), 'Oracle only');
+            assert!(self.roles.read((caller, ORACLE_ROLE)), "Oracle only");
             
-            let (_, market_type, _, _, _, _, is_closed) = self.market_details.read(market_id);
-            assert(market_type == 1, 'Not supply chain market');
-            assert(!is_closed, 'Market closed');
+            let market_details = self.market_details.read(market_id);
+            assert!(market_details.market_type == 1, "Not supply chain market");
+            assert!(!market_details.is_closed, "Market closed");
             
             self.supply_metrics.write(market_id, metrics);
             
@@ -439,13 +455,18 @@ mod AIPredictionMarket {
             forecast_data: Array<felt252>
         ) {
             let caller = get_caller_address();
-            assert(self.roles.read((caller, ORACLE_ROLE)), 'Oracle only');
+            assert!(self.roles.read((caller, ORACLE_ROLE)), "Oracle only");
             
-            let (_, market_type, _, _, _, _, is_closed) = self.market_details.read(market_id);
-            assert(market_type == 2, 'Not robotics market');
-            assert(!is_closed, 'Market closed');
+            let market_details = self.market_details.read(market_id);
+            assert!(market_details.market_type == 2, "Not robotics market");
+            assert!(!market_details.is_closed, "Market closed");
             
-            self.robot_forecasts.write((market_id, robot_id), (efficiency_score, forecast_data));
+            let forecast = RobotForecast {
+                efficiency_score,
+                forecast_data
+            };
+            
+            self.robot_forecasts.write((market_id, robot_id), forecast);
             
             self.emit(Event::RobotForecastUpdated(RobotForecastUpdated {
                 market_id,
@@ -454,60 +475,15 @@ mod AIPredictionMarket {
             }));
         }
 
-        fn update_external_data(
-            ref self: ContractState,
-            market_id: u32,
-            data_type: felt252,
-            data: Array<felt252>
-        ) {
-            let caller = get_caller_address();
-            assert(self.roles.read((caller, ORACLE_ROLE)), 'Oracle only');
-            
-            let (_, _, _, _, _, _, is_closed) = self.market_details.read(market_id);
-            assert(!is_closed, 'Market closed');
-            
-            // Update relevant market parameters based on data type
-            match data_type {
-                1 => { // Supply chain data
-                    let metrics = data.map(|x| x.into());
-                    self.update_supply_metrics(market_id, metrics);
-                },
-                2 => { // Robot efficiency data
-                    if data.len() >= 2 {
-                        let robot_id = *data[0];
-                        let efficiency_score = (*data[1]).into();
-                        let forecast_data = data.slice(2, data.len());
-                        self.update_robot_forecast(market_id, robot_id, efficiency_score, forecast_data);
-                    }
-                },
-                _ => {}
-            }
-            
-            self.emit(Event::ExternalDataUpdated(ExternalDataUpdated {
-                market_id,
-                data_type,
-                timestamp: get_block_timestamp()
-            }));
-        }
-
-        fn get_market_details(
-            self: @ContractState,
-            market_id: u32
-        ) -> (felt252, u8, Array<felt252>, u64, u256, u256, bool) {
+        fn get_market_details(self: @ContractState, market_id: u32) -> MarketDetails {
             self.market_details.read(market_id)
         }
 
-        fn get_ai_analysis(
-            self: @ContractState,
-            market_id: u32
-        ) -> (u256, Array<felt252>) {
+        fn get_ai_analysis(self: @ContractState, market_id: u32) -> AIAnalysis {
             self.ai_analyses.read(market_id)
         }
 
-        fn get_supply_metrics(
-            self: @ContractState,
-            market_id: u32
-        ) -> Array<u256> {
+        fn get_supply_metrics(self: @ContractState, market_id: u32) -> Array<u256> {
             self.supply_metrics.read(market_id)
         }
 
@@ -515,14 +491,11 @@ mod AIPredictionMarket {
             self: @ContractState,
             market_id: u32,
             robot_id: felt252
-        ) -> (u256, Array<felt252>) {
+        ) -> RobotForecast {
             self.robot_forecasts.read((market_id, robot_id))
         }
 
-        fn get_ai_agent_details(
-            self: @ContractState,
-            agent_address: ContractAddress
-        ) -> (bool, u256, felt252) {
+        fn get_ai_agent_details(self: @ContractState, agent_address: ContractAddress) -> AIAgentDetails {
             self.ai_agents.read(agent_address)
         }
 
@@ -530,15 +503,11 @@ mod AIPredictionMarket {
             self.total_liquidity_pool.read()
         }
 
-        fn get_market_stats(
-            self: @ContractState,
-            market_id: u32
-        ) -> (u256, u256, u32) {
+        fn get_market_stats(self: @ContractState, market_id: u32) -> BetDetails {
             self.market_bets.read((market_id, get_caller_address()))
         }
     }
 
-    // Internal functions implementation
     #[generate_trait]
     impl InternalFunctions of InternalFunctionsTrait {
         fn calculate_odds(self: @ContractState, market_id: u32, stake: u256) -> u256 {
@@ -553,9 +522,9 @@ mod AIPredictionMarket {
             };
             
             // Apply AI analysis modifier
-            let (confidence_score, _) = self.ai_analyses.read(market_id);
-            let adjusted_odds = if confidence_score > 0 {
-                (base_odds * confidence_score) / MAX_REPUTATION_SCORE
+            let analysis = self.ai_analyses.read(market_id);
+            let adjusted_odds = if analysis.confidence_score > 0 {
+                (base_odds * analysis.confidence_score) / MAX_REPUTATION_SCORE
             } else {
                 base_odds
             };
@@ -600,34 +569,6 @@ mod AIPredictionMarket {
             } else {
                 true
             }
-        }
-
-        fn validate_market_parameters(
-            self: @ContractState,
-            market_type: u8,
-            prediction_parameters: Array<felt252>
-        ) -> bool {
-            match market_type {
-                1 => self.validate_supply_chain_parameters(prediction_parameters),
-                2 => self.validate_robotics_parameters(prediction_parameters),
-                3 => self.validate_resource_parameters(prediction_parameters),
-                _ => false
-            }
-        }
-
-        fn validate_supply_chain_parameters(self: @ContractState, parameters: Array<felt252>) -> bool {
-            // Minimum required parameters for supply chain markets
-            parameters.len() >= 3
-        }
-
-        fn validate_robotics_parameters(self: @ContractState, parameters: Array<felt252>) -> bool {
-            // Minimum required parameters for robotics markets
-            parameters.len() >= 4
-        }
-
-        fn validate_resource_parameters(self: @ContractState, parameters: Array<felt252>) -> bool {
-            // Minimum required parameters for resource allocation markets
-            parameters.len() >= 2
         }
     }
 }
